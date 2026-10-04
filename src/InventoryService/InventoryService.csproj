@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><UserSecretsId>ed26fabd-e557-427a-93ff-b6a9bf9d7aa8</UserSecretsId>
+</PropertyGroup>
+  <PropertyGroup Condition=" '$(RunConfiguration)' == 'http' " />
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup><PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.0" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Swashbuckle.AspNetCore" Version="8.0.0" /></ItemGroup>
+  <ItemGroup>
+    <None Remove="Controllers\" />
+    <None Remove="Application \" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Controllers\" />
+    <Folder Include="Application \" />
+  </ItemGroup>
+</Project>
