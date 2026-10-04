@@ -1,0 +1,306 @@
+================================================================================
+ECommerce Microservices - Testing Guide
+================================================================================
+Generated: October 4, 2026
+Scope: OrderService, InventoryService, PaymentService
+================================================================================
+
+
+PREREQUISITES
+--------------------------------------------------------------------------------
+Start all three services before testing:
+
+    InventoryService -> http://localhost:5002
+    PaymentService    -> http://localhost:5003
+    OrderService      -> http://localhost:5001
+
+Each service exposes a Swagger UI at its root URL ("/"). Swagger is the
+easiest way to test interactively, but curl commands are also provided below
+for scripting / automation.
+
+Note: Azure SQL (serverless tier) databases may take 30-60 seconds to resume
+from auto-pause on first connection. If a service throws a transient SQL
+error (40613 "database is not currently available") on startup, simply wait
+and restart it.
+
+
+================================================================================
+1. BASIC CRUD ON ORDERS
+================================================================================
+
+1.1 Create an Order
+--------------------------------------------------------------------------------
+Uses the seeded demo product (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, stock = 10).
+
+    curl -X POST http://localhost:5001/api/orders \
+      -H "Content-Type: application/json" \
+      -d '{
+            "customerId": "11111111-1111-1111-1111-111111111111",
+            "items": [
+              { "productId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "quantity": 2, "unitPrice": 500 }
+            ]
+          }'
+
+Expected: 201 Created, body contains { "orderId": "<guid>" }.
+Copy the returned orderId for the next steps.
+
+
+1.2 Get an Order
+--------------------------------------------------------------------------------
+    curl http://localhost:5001/api/orders/{orderId}
+
+Expected: 200 OK with Id, CustomerId, Status, Total.
+Expected (unknown id): 404 Not Found.
+
+
+1.3 Update an Order
+--------------------------------------------------------------------------------
+    curl -X PUT http://localhost:5001/api/orders/{orderId} \
+      -H "Content-Type: application/json" \
+      -d '{
+            "orderId": "{orderId}",
+            "items": [
+              { "productId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "quantity": 3, "unitPrice": 500 }
+            ]
+          }'
+
+Expected: 204 No Content when order is still in Draft status.
+Note: Since Create() auto-confirms the order, calling Update afterwards is
+expected to throw "Only draft orders can be updated." This is correct domain
+behavior, not a bug.
+
+
+1.4 Delete an Order
+--------------------------------------------------------------------------------
+    curl -X DELETE http://localhost:5001/api/orders/{orderId}
+
+Expected: 204 No Content (order + its OrderItems are cascade-deleted).
+Expected (unknown id): 404 Not Found.
+
+
+================================================================================
+2. DOMAIN VALIDATION RULES (expect 400 / error responses)
+================================================================================
+
+Test Case                                   | Expected Result
+---------------------------------------------------------------------------
+Empty customerId                            | 400 - "CustomerId is required."
+Empty items array                           | 400 - "At least one order item
+                                             |  is required."
+productId = 00000000-0000-0000-0000-00...   | 400 - "Each order item requires
+                                             |  a valid ProductId."
+quantity <= 0                               | DomainException - "Quantity
+                                             |  must be greater than zero."
+unitPrice <= 0                              | DomainException - "Price must
+                                             |  be greater than zero."
+Update a Confirmed order                    | DomainException - "Only draft
+                                             |  orders can be updated."
+
+
+================================================================================
+3. SAGA CHECKOUT FLOW (Inventory + Payment orchestration)
+================================================================================
+
+3.1 Happy Path
+--------------------------------------------------------------------------------
+Create a fresh order (section 1.1), then call checkout:
+
+    curl -X POST http://localhost:5001/api/orders/{orderId}/checkout
+
+Expected: 200 OK
+    {
+      "orderId": "...",
+      "status": "Completed",
+      "message": "Inventory reserved and payment processed."
+    }
+
+Verify side effects:
+  - InventoryService: AvailableQuantity for the product decreased by the
+    ordered quantity; ReservedQuantity increased.
+  - PaymentService: a Payment record with status "Processed" exists.
+
+    curl http://localhost:5003/api/payments/order/{orderId}
+
+
+3.2 Payment Failure + Compensation (Saga rollback)
+--------------------------------------------------------------------------------
+PaymentService has a built-in demo rule: any amount >= 99,999 is declined.
+
+Create an order with a large amount:
+
+    curl -X POST http://localhost:5001/api/orders \
+      -H "Content-Type: application/json" \
+      -d '{
+            "customerId": "11111111-1111-1111-1111-111111111111",
+            "items": [
+              { "productId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "quantity": 1, "unitPrice": 100000 }
+            ]
+          }'
+
+Then checkout that order:
+
+    curl -X POST http://localhost:5001/api/orders/{orderId}/checkout
+
+Expected: 503 Service Unavailable
+    {
+      "orderId": "...",
+      "status": "Failed",
+      "message": "..."
+    }
+
+Verify compensation:
+  - InventoryService: the previously reserved stock for this order has been
+    released back to AvailableQuantity (ReservedQuantity decreased again).
+  - This proves the Saga's compensating transaction executed correctly.
+
+
+================================================================================
+4. RESILIENCE PIPELINE (Retry / Circuit Breaker / Timeout / Rate Limiter)
+================================================================================
+
+All outbound HTTP calls from OrderService to InventoryService and
+PaymentService go through a named resilience pipeline defined in
+Infrastructure/Resilience/ResiliencePipelineExtensions.cs. Order of
+execution: Rate Limiter -> Retry -> Circuit Breaker -> Timeout.
+
+
+4.1 Test Retry
+--------------------------------------------------------------------------------
+Steps:
+  1. Stop PaymentService.
+  2. Create a new order (section 1.1).
+  3. Call checkout for that order.
+  4. Watch OrderService's console output.
+
+Expected console output (exponential backoff with jitter):
+    [Retry] Attempt 2 after ~1000ms due to: ...
+    [Retry] Attempt 3 after ~2000ms due to: ...
+
+After 3 failed attempts, the call ultimately fails and compensation runs
+(inventory already reserved is released; see section 3.2 pattern).
+
+
+4.2 Test Circuit Breaker
+--------------------------------------------------------------------------------
+Steps:
+  1. Keep PaymentService stopped.
+  2. Call checkout repeatedly (8+ times) in a short loop, e.g.:
+
+        for i in {1..10}; do
+          curl -s -o /dev/null -w "%{http_code}\n" \
+            -X POST http://localhost:5001/api/orders/{orderId}/checkout
+        done
+
+Expected console output once failure ratio/threshold is exceeded:
+    [CircuitBreaker] Circuit OPENED for 15s.
+
+While open, further calls fail INSTANTLY (no retry delay, fails fast without
+hitting the network).
+
+  3. Wait 15+ seconds, then call checkout once more.
+
+Expected console output:
+    [CircuitBreaker] Circuit HALF-OPEN - testing downstream with a trial
+    request.
+
+  4. Restart PaymentService, then call checkout again.
+
+Expected console output:
+    [CircuitBreaker] Circuit CLOSED - downstream recovered.
+
+
+4.3 Test Timeout
+--------------------------------------------------------------------------------
+Per-attempt timeout is configured at 5 seconds. This is hard to trigger
+without an artificially slow downstream service. To verify the mechanism
+works, temporarily lower the Timeout value in
+ResiliencePipelineExtensions.cs (e.g., to 1 millisecond), restart
+OrderService, and call checkout.
+
+Expected console output:
+    [Timeout] Request exceeded 0.001s and was aborted.
+
+Remember to revert the timeout value back afterwards.
+
+
+4.4 Test Rate Limiting
+--------------------------------------------------------------------------------
+The pipeline allows 10 concurrent requests with a queue of 20 more before
+rejecting. Fire a burst of concurrent checkout calls to exceed this limit,
+e.g.:
+
+    for i in {1..50}; do
+      curl -s -o /dev/null -w "%{http_code}\n" \
+        -X POST http://localhost:5001/api/orders/{orderId}/checkout &
+    done
+    wait
+
+Expected: some requests return 503 due to RateLimiterRejectedException once
+the permit + queue limits are exceeded.
+
+
+================================================================================
+5. SWAGGER UI VERIFICATION
+================================================================================
+
+Open the following in a browser and confirm each endpoint is listed with
+correct request/response schemas, and can be executed interactively:
+
+    http://localhost:5001/   (OrderService)
+        POST   /api/orders
+        GET    /api/orders/{id}
+        PUT    /api/orders/{id}
+        DELETE /api/orders/{id}
+        POST   /api/orders/{id}/checkout
+
+    http://localhost:5002/   (InventoryService)
+        POST   /api/inventory/reserve
+        POST   /api/inventory/release
+
+    http://localhost:5003/   (PaymentService)
+        POST   /api/payments/process
+        GET    /api/payments/order/{orderId}
+
+
+================================================================================
+6. HEALTH CHECKS
+================================================================================
+
+    curl http://localhost:5001/health   -> {"status":"Healthy","service":"OrderService"}
+    curl http://localhost:5002/health   -> {"status":"Healthy","service":"InventoryService"}
+    curl http://localhost:5003/health   -> {"status":"Healthy","service":"PaymentService"}
+
+
+================================================================================
+TROUBLESHOOTING NOTES
+================================================================================
+
+- "Unable to resolve service for type IInventoryServiceClient" at OrderService
+  startup means the AddHttpClient<...> registrations in Program.cs are
+  missing. Re-add them (see Infrastructure/Resilience/
+  ResiliencePipelineExtensions.cs and Infrastructure/ExternalServices/).
+
+- Checkout returns 404 "Response status code does not indicate success:
+  404 (Not Found)" -> InventoryService's /api/inventory/reserve or /release
+  minimal API endpoints are commented out in its Program.cs. Re-enable them.
+
+- "Address already in use" on service startup -> a previous instance is
+  still holding the port. Find and kill it:
+
+      lsof -nP -iTCP:5001 -sTCP:LISTEN
+      kill -9 <PID>
+
+- Azure SQL error 40613 "database is not currently available" -> serverless
+  database auto-pause; simply retry starting the service after ~30-60s.
+
+- IMPORTANT: Save/commit working changes to git frequently. Several fixes in
+  this project were lost due to editor/IDE auto-revert of unsaved files.
+  Run: git add -A && git commit -m "working state" after each verified step.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
