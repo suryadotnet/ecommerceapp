@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using OrderService.Domain.Exceptions;
 
 namespace OrderService.Domain
@@ -10,11 +10,14 @@ namespace OrderService.Domain
         public Guid ProductId { get; private set; }
         public int Quantity { get; private set; }
         public decimal UnitPrice { get; private set; }
+        // URL of the product image uploaded to Blob Storage at order-creation time.
+        public string? ImageUrl { get; private set; }
         private OrderItem() { }
         internal OrderItem(
         Guid productId,
         int quantity,
-        decimal unitPrice)
+        decimal unitPrice,
+        string? imageUrl = null)
         {
             if (quantity <= 0)
                 throw new DomainException(
@@ -26,6 +29,7 @@ namespace OrderService.Domain
             ProductId = productId;
             Quantity = quantity;
             UnitPrice = unitPrice;
+            ImageUrl = imageUrl;
         }
         public decimal Total => Quantity * UnitPrice;
     }

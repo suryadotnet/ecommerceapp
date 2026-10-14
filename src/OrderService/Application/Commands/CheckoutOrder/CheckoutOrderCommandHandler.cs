@@ -17,17 +17,20 @@ public class CheckoutOrderCommandHandler : IRequestHandler<CheckoutOrderCommand,
     private readonly OrderDbContext _db;
     private readonly IInventoryServiceClient _inventory;
     private readonly IPaymentServiceClient _payment;
+    private readonly IPaymentMessagePublisher _paymentMessagePublisher;
     private readonly ILogger<CheckoutOrderCommandHandler> _logger;
 
     public CheckoutOrderCommandHandler(
         OrderDbContext db,
         IInventoryServiceClient inventory,
         IPaymentServiceClient payment,
+        IPaymentMessagePublisher paymentMessagePublisher,
         ILogger<CheckoutOrderCommandHandler> logger)
     {
         _db = db;
         _inventory = inventory;
         _payment = payment;
+        _paymentMessagePublisher = paymentMessagePublisher;
         _logger = logger;
     }
 
@@ -53,6 +56,12 @@ public class CheckoutOrderCommandHandler : IRequestHandler<CheckoutOrderCommand,
             await _payment.ProcessPaymentAsync(
                 new ProcessPaymentRequest(order.Id, order.CustomerId, total), ct);
 
+            // Step 3: store the payment event in the outbox for asynchronous topic delivery.
+            await _paymentMessagePublisher.PublishPaymentInfoAsync(
+                new PaymentInfoMessage(order.Id, order.CustomerId, total, "Completed", DateTime.UtcNow),
+                ct);
+            await _db.SaveChangesAsync(ct);
+
             return new CheckoutOrderResult(order.Id, "Completed", "Inventory reserved and payment processed.");
         }
         catch (Exception ex) when (ex is HttpRequestException
@@ -77,8 +86,14 @@ public class CheckoutOrderCommandHandler : IRequestHandler<CheckoutOrderCommand,
                 }
             }
 
+            // Publish failed payment info as well, so downstream consumers are notified.
+            var failedTotal = order.Items.Sum(i => i.Quantity * i.UnitPrice);
+            await _paymentMessagePublisher.PublishPaymentInfoAsync(
+                new PaymentInfoMessage(order.Id, order.CustomerId, failedTotal, "Failed", DateTime.UtcNow),
+                CancellationToken.None);
+            await _db.SaveChangesAsync(CancellationToken.None);
+
             return new CheckoutOrderResult(order.Id, "Failed", ex.Message);
         }
     }
 }
-

@@ -12,7 +12,10 @@ public record CreateOrderCommand(
 public record CreateOrderItemRequest(
  Guid ProductId,
  int Quantity,
- decimal UnitPrice);
+ decimal UnitPrice,
+ // Blob Storage URL of the uploaded product image, resolved by the controller
+ // before the command is sent (see OrdersController.Create).
+ string? ImageUrl = null);
 
 //public sealed record CreateOrderResult(Guid OrderId, OrderStatus Status, string Message);'
 

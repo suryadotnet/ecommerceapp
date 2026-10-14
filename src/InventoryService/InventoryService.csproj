@@ -5,8 +5,13 @@
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
-  <ItemGroup><PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.0" /></ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.0" />
+    <PackageReference Include="Azure.Identity" Version="1.11.4" />
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.18.1" />
+  </ItemGroup>
   <ItemGroup><PackageReference Include="Swashbuckle.AspNetCore" Version="8.0.0" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Microsoft.ApplicationInsights.AspNetCore" Version="2.22.0" /></ItemGroup>
   <ItemGroup>
     <None Remove="Controllers\" />
     <None Remove="Application \" />

@@ -27,13 +27,14 @@ public sealed class Order
     public void AddItem(
     Guid productId,
     int quantity,
-    decimal unitPrice)
+    decimal unitPrice,
+    string? imageUrl = null)
     {
         if (Status != OrderStatus.Draft)
             throw new DomainException(
             "Items cannot be added after order confirmation.");
         var item = new OrderItem(
-        productId, quantity, unitPrice);
+        productId, quantity, unitPrice, imageUrl);
         _items.Add(item);
     }
 

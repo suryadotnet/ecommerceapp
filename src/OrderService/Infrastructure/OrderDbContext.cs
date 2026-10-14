@@ -47,9 +47,26 @@ public class OrderDbContext : DbContext
                 item.Property(x => x.ProductId).IsRequired();
                 item.Property(x => x.Quantity).IsRequired();
                 item.Property(x => x.UnitPrice).HasColumnType("decimal(18,2)").IsRequired();
+                // Blob Storage URL of the product image uploaded at order-creation time.
+                item.Property(x => x.ImageUrl).HasMaxLength(1024).IsRequired(false);
             });
+        });
+
+        modelBuilder.Entity<OutboxMessage>(entity =>
+        {
+            entity.ToTable("OutboxMessages");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.DestinationType).HasMaxLength(16).IsRequired();
+            entity.Property(x => x.DestinationName).HasMaxLength(256).IsRequired();
+            entity.Property(x => x.Subject).HasMaxLength(256).IsRequired();
+            entity.Property(x => x.Payload).IsRequired();
+            entity.Property(x => x.CreatedAtUtc).IsRequired();
+            entity.Property(x => x.NextAttemptAtUtc).IsRequired();
+            entity.Property(x => x.LastError).HasMaxLength(4000);
+            entity.HasIndex(x => new { x.ProcessedAtUtc, x.NextAttemptAtUtc });
         });
     }
 
     public DbSet<Order> Orders => Set<Order>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 }
