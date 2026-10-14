@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using OrderService.Domain;
 using OrderService.Infrastructure;
+using OrderService.Infrastructure.ExternalServices;
 
 namespace OrderService.Application.Commands.CreateOrder;
 
@@ -10,9 +11,12 @@ public class CreateOrderCommandHandler
  : IRequestHandler<CreateOrderCommand, Guid>
 {
     private readonly OrderDbContext _db;
-    public CreateOrderCommandHandler(OrderDbContext db)
+    private readonly IOrderMessagePublisher _messagePublisher;
+
+    public CreateOrderCommandHandler(OrderDbContext db, IOrderMessagePublisher messagePublisher)
     {
         _db = db;
+        _messagePublisher = messagePublisher;
     }
     public async Task<Guid> Handle(
     CreateOrderCommand request,
@@ -33,12 +37,19 @@ public class CreateOrderCommandHandler
             order.AddItem(
             item.ProductId,
             item.Quantity,
-            item.UnitPrice);
+            item.UnitPrice,
+            item.ImageUrl);
         }
         order.Confirm();
         _db.Orders.Add(order);
+
+        await _messagePublisher.PublishOrderCreatedAsync(
+            new OrderCreatedMessage(order.Id, order.CustomerId, order.GetTotal(), order.CreatedAtUtc),
+            cancellationToken);
+
+        // The order and its event are committed together; Service Bus delivery is asynchronous.
         await _db.SaveChangesAsync(cancellationToken);
+
         return order.Id;
     }
 }
-

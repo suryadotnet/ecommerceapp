@@ -1,6 +1,6 @@
 # E-Commerce Microservices — .NET 10 Demo
 
-A teaching/demo project showing **Microservices + CQRS + HTTP Saga orchestration + separate databases**.
+A teaching/demo project showing **Microservices + CQRS + Saga orchestration + separate databases + transactional outbox messaging**.
 
 ## Services
 
@@ -8,7 +8,7 @@ A teaching/demo project showing **Microservices + CQRS + HTTP Saga orchestration
 - InventoryService — port 5002 — owns `InventoryDb`
 - PaymentService — port 5003 — owns `PaymentDb`
 
-No Service Bus is used in this version. Inter-service communication is synchronous HTTP.
+Order and payment events are published asynchronously through Azure Service Bus. Checkout's inventory reservation and payment processing still use synchronous HTTP.
 
 ## Architecture
 
@@ -30,6 +30,21 @@ OrderDb is accessed only by OrderService.
 InventoryDb is accessed only by InventoryService.
 PaymentDb is accessed only by PaymentService.
 ```
+
+## Outbox and Service Bus consumers
+
+OrderService writes each outgoing event to `OutboxMessages` in the same OrderDb save as the order or payment event. A background dispatcher retries pending rows and sends them to:
+
+- Queue `ordersvcqueue` with subject `OrderCreated`
+- Topic `ordersvctopic` with subject `PaymentInfo`
+
+The InventoryService background consumer listens to `ordersvcqueue` and the `ordersvctopicsubscription` subscription on `ordersvctopic`. It stores received events in `OrderCreatedReceipts` and `PaymentInfoReceipts`; the message ID is the primary key, so redelivered events are recorded only once. These consumers record events; inventory is still reserved by the existing synchronous checkout flow.
+
+Create the queue, topic, and topic subscription in the Azure Service Bus namespace before running the services. Configure either `ConnectionStrings:ServiceBus` with a Service Bus connection string, or `ServiceBus:Namespace` with Managed Identity access. Grant OrderService send access and InventoryService listen access.
+
+For Docker Compose, provide `SERVICEBUS_CONNECTION_STRING` or `SERVICEBUS_NAMESPACE` in the environment before starting the services. If neither is configured, both background services log a warning and remain disabled; outbox events stay persisted until Service Bus is configured.
+
+See [Outbox and DLQ testing notes](./docs/outbox-and-dlq-testing.md) for end-to-end delivery checks and dead-letter test cases.
 
 ## Saga
 
@@ -83,6 +98,8 @@ dotnet run --project src/OrderService
 ```
 
 Run InventoryService and PaymentService separately as well.
+
+For local Service Bus access, configure `ConnectionStrings__ServiceBus` or `ServiceBus__Namespace` in the process environment for both OrderService and InventoryService.
 
 ## Demo requests
 

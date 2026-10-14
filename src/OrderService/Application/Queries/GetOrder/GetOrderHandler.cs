@@ -26,7 +26,14 @@ public class GetOrderQueryHandler
             CustomerId = x.CustomerId,
             Status = x.Status.ToString(),
             Total = x.Items.Sum(i =>
-     i.Quantity * i.UnitPrice)
+     i.Quantity * i.UnitPrice),
+            Items = x.Items.Select(i => new OrderItemDto
+            {
+                ProductId = i.ProductId,
+                Quantity = i.Quantity,
+                UnitPrice = i.UnitPrice,
+                ImageUrl = i.ImageUrl
+            }).ToList()
         })
         .FirstOrDefaultAsync(cancellationToken);
 

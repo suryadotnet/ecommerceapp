@@ -4,7 +4,9 @@
       "commandName": "Project",
       "applicationUrl": "http://localhost:5001",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "Services__Inventory": "http://localhost:5002",
+        "Services__Payment": "http://localhost:5003"
       },
       "dotnetRunMessages": true
     }
