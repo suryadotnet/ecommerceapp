@@ -1,31 +1,38 @@
+version: "2.1"
+
 services:
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: ecommerce-sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "Your_strong_password123!"
+      MSSQL_SA_PASSWORD: "${SQL_SA_PASSWORD:?Set SQL_SA_PASSWORD in .env}"
     ports:
       - "1433:1433"
     volumes:
       - sqlserver-data:/var/opt/mssql
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Your_strong_password123!' -C -Q 'SELECT 1' || exit 1"]
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" || exit 1
       interval: 10s
       timeout: 5s
       retries: 20
+      start_period: 30s
 
   orderservice:
     build:
       context: .
       dockerfile: src/OrderService/Dockerfile
     environment:
+      ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__ServiceBus: "${SERVICEBUS_CONNECTION_STRING:-}"
-      ServiceBus__Namespace: "${SERVICEBUS_NAMESPACE:-appilityecommservices.servicebus.windows.net}"
-      ConnectionStrings__OrderDb: "Server=sqlserver,1433;Database=OrderDb;User Id=sa;Password=Your_strong_password123!;TrustServerCertificate=True;"
-      Services__Inventory: "http://inventoryservice:8080"
-      Services__Payment: "http://paymentservice:8080"
+      AzureAd__TenantId: "${AZURE_AD_TENANT_ID:?Set AZURE_AD_TENANT_ID in .env}"
+      AzureAd__ClientId: "${ORDER_API_CLIENT_ID:?Set ORDER_API_CLIENT_ID in .env}"
+      ConnectionStrings__OrderDb: "Server=sqlserver,1433;Database=OrderDb;User Id=sa;Password=${SQL_SA_PASSWORD:?Set SQL_SA_PASSWORD in .env};TrustServerCertificate=True;Encrypt=False"
+      ConnectionStrings__BlobStorage: "${BLOB_STORAGE_CONNECTION_STRING:?Set BLOB_STORAGE_CONNECTION_STRING in .env}"
+      ConnectionStrings__ServiceBus: "${SERVICEBUS_CONNECTION_STRING:?Set SERVICEBUS_CONNECTION_STRING in .env}"
+      Services__Inventory: http://inventoryservice:8080
+      Services__Payment: http://paymentservice:8080
     ports:
       - "5001:8080"
     depends_on:
@@ -41,10 +48,10 @@ services:
       context: .
       dockerfile: src/InventoryService/Dockerfile
     environment:
+      ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__ServiceBus: "${SERVICEBUS_CONNECTION_STRING:-}"
-      ServiceBus__Namespace: "${SERVICEBUS_NAMESPACE:-appilityecommservices.servicebus.windows.net}"
-      ConnectionStrings__InventoryDb: "Server=sqlserver,1433;Database=InventoryDb;User Id=sa;Password=Your_strong_password123!;TrustServerCertificate=True;"
+      ConnectionStrings__InventoryDb: "Server=sqlserver,1433;Database=InventoryDb;User Id=sa;Password=${SQL_SA_PASSWORD:?Set SQL_SA_PASSWORD in .env};TrustServerCertificate=True;Encrypt=False"
+      ConnectionStrings__ServiceBus: "${SERVICEBUS_CONNECTION_STRING:?Set SERVICEBUS_CONNECTION_STRING in .env}"
     ports:
       - "5002:8080"
     depends_on:
@@ -56,13 +63,28 @@ services:
       context: .
       dockerfile: src/PaymentService/Dockerfile
     environment:
+      ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__PaymentDb: "Server=sqlserver,1433;Database=PaymentDb;User Id=sa;Password=Your_strong_password123!;TrustServerCertificate=True;"
+      ConnectionStrings__PaymentDb: "Server=sqlserver,1433;Database=PaymentDb;User Id=sa;Password=${SQL_SA_PASSWORD:?Set SQL_SA_PASSWORD in .env};TrustServerCertificate=True;Encrypt=False"
+      ConnectionStrings__ServiceBus: "${SERVICEBUS_CONNECTION_STRING:?Set SERVICEBUS_CONNECTION_STRING in .env}"
     ports:
       - "5003:8080"
     depends_on:
       sqlserver:
         condition: service_healthy
+
+  ecommazurefunctions:
+    build:
+      context: .
+      dockerfile: src/EcommAzureFunctions/Dockerfile
+    environment:
+      FUNCTIONS_WORKER_RUNTIME: dotnet-isolated
+      AzureWebJobsStorage: "${BLOB_STORAGE_CONNECTION_STRING:?Set BLOB_STORAGE_CONNECTION_STRING in .env}"
+      BlobStorageConnection: "${BLOB_STORAGE_CONNECTION_STRING:?Set BLOB_STORAGE_CONNECTION_STRING in .env}"
+      ServiceBusConnection: "${SERVICEBUS_CONNECTION_STRING:?Set SERVICEBUS_CONNECTION_STRING in .env}"
+      ServiceBusQueueName: "${SERVICEBUS_QUEUE_NAME:-ordersvcqueue}"
+    ports:
+      - "7071:80"
 
 volumes:
   sqlserver-data:

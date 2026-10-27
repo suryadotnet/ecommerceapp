@@ -63,6 +63,27 @@ public sealed class Order
         Status = OrderStatus.Confirmed;
     }
 
+    public void Submit()
+    {
+        if (!_items.Any())
+            throw new DomainException("Order must contain at least one item.");
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Only draft orders can be submitted.");
+        Status = OrderStatus.Pending;
+    }
+
+    public void MarkPaymentSucceeded()
+    {
+        if (Status == OrderStatus.Pending)
+            Status = OrderStatus.Confirmed;
+    }
+
+    public void MarkPaymentFailed()
+    {
+        if (Status == OrderStatus.Pending)
+            Status = OrderStatus.Failed;
+    }
+
     public void Cancel()
     {
         if (Status == OrderStatus.Cancelled)

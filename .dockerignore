@@ -1,0 +1,11 @@
+.git
+.vs
+.vscode
+**/bin
+**/obj
+**/local.settings.json
+.env
+.env.*
+!.env.example
+**/*.user
+**/*.suo

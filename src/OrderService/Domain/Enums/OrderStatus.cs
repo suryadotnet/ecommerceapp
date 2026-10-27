@@ -5,7 +5,8 @@ namespace OrderService.Domain.Enums
     {
         Draft = 1,
         Confirmed = 2,
-        Cancelled = 3
+        Cancelled = 3,
+        Pending = 4,
+        Failed = 5
     }
 }
-
