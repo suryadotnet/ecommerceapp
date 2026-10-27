@@ -126,9 +126,8 @@ namespace OrderService.Controllers
             return Ok(result);
         }
 
-        // Reserves inventory and processes payment for an existing order. Calls to
-        // InventoryService/PaymentService are protected by Rate Limiter, Retry,
-        // Circuit Breaker and Timeout. Returns 200 on success, 503 if downstream failed.
+        // Compatibility/status endpoint. Order creation starts the choreography saga;
+        // this endpoint reports its current state and does not trigger a second checkout.
         [HttpPost("{id:guid}/checkout")]
         public async Task<IActionResult> Checkout(
         Guid id,
@@ -153,9 +152,13 @@ namespace OrderService.Controllers
             //     id,
             //     DateTime.UtcNow);
 
-            return result.Status == "Completed"
-                ? Ok(result)
-                : StatusCode(StatusCodes.Status503ServiceUnavailable, result);
+            return result.Status switch
+            {
+                "Completed" => Ok(result),
+                "Pending" => AcceptedAtAction(nameof(GetById), new { id = result.OrderId }, result),
+                "Failed" => Conflict(result),
+                _ => Conflict(result)
+            };
         }
 
         [HttpPut("{id:guid}")]
@@ -199,4 +202,3 @@ namespace OrderService.Controllers
     }
 }
     
-

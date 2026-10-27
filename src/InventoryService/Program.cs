@@ -5,9 +5,11 @@ using Microsoft.OpenApi;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddDbContext<InventoryDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("InventoryDb")));
 builder.Services.AddHostedService<ServiceBusConsumer>();
+builder.Services.AddHostedService<InventoryOutboxDispatcher>();
 
 // Application Insights telemetry & logging
 builder.Services.AddApplicationInsightsTelemetry(options =>
@@ -72,6 +74,45 @@ await using (var scope = app.Services.CreateAsyncScope())
                 ProcessedAtUtc datetime2 NOT NULL,
                 ReceivedAtUtc datetime2 NOT NULL
             );
+        END;
+        IF OBJECT_ID(N'dbo.InventoryReservations', N'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.InventoryReservations
+            (
+                ReservationId uniqueidentifier NOT NULL,
+                OrderId uniqueidentifier NOT NULL,
+                ProductId uniqueidentifier NOT NULL,
+                Quantity int NOT NULL,
+                IsReleased bit NOT NULL CONSTRAINT DF_InventoryReservations_IsReleased DEFAULT 0,
+                CreatedAtUtc datetime2 NOT NULL,
+                CONSTRAINT PK_InventoryReservations PRIMARY KEY (ReservationId, ProductId)
+            );
+            CREATE INDEX IX_InventoryReservations_OrderId ON dbo.InventoryReservations(OrderId);
+        END;
+        IF OBJECT_ID(N'dbo.InventoryEventReceipts', N'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.InventoryEventReceipts
+            (
+                MessageId nvarchar(128) NOT NULL CONSTRAINT PK_InventoryEventReceipts PRIMARY KEY,
+                ProcessedAtUtc datetime2 NOT NULL
+            );
+        END;
+        IF OBJECT_ID(N'dbo.InventoryOutboxMessages', N'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.InventoryOutboxMessages
+            (
+                Id uniqueidentifier NOT NULL CONSTRAINT PK_InventoryOutboxMessages PRIMARY KEY,
+                DestinationName nvarchar(256) NOT NULL,
+                Subject nvarchar(256) NOT NULL,
+                Payload nvarchar(max) NOT NULL,
+                CreatedAtUtc datetime2 NOT NULL,
+                ProcessedAtUtc datetime2 NULL,
+                NextAttemptAtUtc datetime2 NOT NULL,
+                Attempts int NOT NULL,
+                LastError nvarchar(4000) NULL
+            );
+            CREATE INDEX IX_InventoryOutboxMessages_ProcessedAtUtc_NextAttemptAtUtc
+                ON dbo.InventoryOutboxMessages(ProcessedAtUtc, NextAttemptAtUtc);
         END;
         """);
     var productId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");

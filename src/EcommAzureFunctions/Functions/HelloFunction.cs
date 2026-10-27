@@ -2,14 +2,19 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 using System.Net;
+using EcommAzureFunctions.Services;
 
 public class HelloFunction
 {
     private readonly ILogger<HelloFunction> _logger;
+    private readonly GreetingService _greetingService;
 
-    public HelloFunction(ILogger<HelloFunction> logger)
+    public HelloFunction(
+        ILogger<HelloFunction> logger,
+        GreetingService greetingService)
     {
         _logger = logger;
+        _greetingService = greetingService;
     }
 
     [Function("HelloFunction")]
@@ -23,8 +28,7 @@ public class HelloFunction
 
         var response = req.CreateResponse(HttpStatusCode.OK);
 
-        await response.WriteStringAsync(
-            "Hello from Azure Functions!");
+        await response.WriteStringAsync(_greetingService.CreateGreeting());
 
         return response;
     }

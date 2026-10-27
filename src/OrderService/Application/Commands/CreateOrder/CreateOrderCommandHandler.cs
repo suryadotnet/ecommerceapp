@@ -40,11 +40,19 @@ public class CreateOrderCommandHandler
             item.UnitPrice,
             item.ImageUrl);
         }
-        order.Confirm();
+        order.Submit();
         _db.Orders.Add(order);
 
         await _messagePublisher.PublishOrderCreatedAsync(
-            new OrderCreatedMessage(order.Id, order.CustomerId, order.GetTotal(), order.CreatedAtUtc),
+            new OrderCreatedMessage(
+                order.Id,
+                order.CustomerId,
+                order.GetTotal(),
+                order.CreatedAtUtc,
+                order.Items.Select(item => new OrderCreatedItemMessage(
+                    item.ProductId,
+                    item.Quantity,
+                    item.UnitPrice)).ToList()),
             cancellationToken);
 
         // The order and its event are committed together; Service Bus delivery is asynchronous.

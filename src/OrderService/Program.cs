@@ -8,8 +8,47 @@ using OrderService.Infrastructure.Resilience;
 using MediatR;
 using Azure.Identity;
 using Azure.Storage.Blobs;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Identity.Web;
 
 var builder = WebApplication.CreateBuilder(args);
+
+//builder.AddServiceDefaults();
+
+var entraTenantId = builder.Configuration["AzureAd:TenantId"];
+var entraClientId = builder.Configuration["AzureAd:ClientId"];
+if (!Guid.TryParse(entraTenantId, out _) || !Guid.TryParse(entraClientId, out _))
+{
+    throw new InvalidOperationException(
+        "Configure AzureAd:TenantId and AzureAd:ClientId with the Entra tenant ID and OrderService API app registration client ID.");
+}
+
+var entraScopes = builder.Configuration.GetSection("AzureAd:Scopes").Get<string[]>();
+if (entraScopes is not { Length: > 0 })
+{
+    entraScopes = [$"api://{entraClientId}/access_as_user"];
+}
+
+var swaggerClientId = builder.Configuration["AzureAd:SwaggerClientId"];
+if (string.IsNullOrWhiteSpace(swaggerClientId))
+{
+    swaggerClientId = entraClientId;
+}
+else if (!Guid.TryParse(swaggerClientId, out _))
+{
+    throw new InvalidOperationException(
+        "AzureAd:SwaggerClientId must be a valid client ID when configured.");
+}
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"));
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 // Load secrets (e.g. ConnectionStrings:OrderDb) from Azure Key Vault.
 // Skipped in Development so local `dotnet run` never requires Azure CLI /
@@ -46,8 +85,8 @@ builder.Services.AddSingleton(sp =>
 // Store outgoing events in the same database transaction as the order/payment work.
 builder.Services.AddScoped<IOrderMessagePublisher, OutboxOrderMessagePublisher>();
 
-builder.Services.AddScoped<IPaymentMessagePublisher, OutboxPaymentMessagePublisher>();
 builder.Services.AddHostedService<OutboxDispatcher>();
+builder.Services.AddHostedService<OrderSagaConsumer>();
 
 // Uploads product images to Blob Storage container "product-images" during order
 // creation (see OrdersController.CreateWithImages) and returns the blob URL to
@@ -84,11 +123,39 @@ builder.Services.AddHttpClient<IPaymentServiceClient, PaymentServiceClient>(clie
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
+    var authority = $"https://login.microsoftonline.com/{entraTenantId}/oauth2/v2.0";
     c.SwaggerDoc("v1", new OpenApiInfo
     {
         Title = "Order Service API", // change per microservice
         Version = "v1",
         Description = "Microservice API documentation"
+    });
+    c.AddSecurityDefinition("OAuth2", new OpenApiSecurityScheme
+    {
+        Type = SecuritySchemeType.OAuth2,
+        Flows = new OpenApiOAuthFlows
+        {
+            AuthorizationCode = new OpenApiOAuthFlow
+            {
+                AuthorizationUrl = new Uri($"{authority}/authorize"),
+                TokenUrl = new Uri($"{authority}/token"),
+                Scopes = entraScopes.ToDictionary(scope => scope, _ => "Access the OrderService API")
+            }
+        }
+    });
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "OAuth2"
+                }
+            },
+            entraScopes
+        }
     });
 });
 
@@ -100,6 +167,10 @@ builder.Services.AddMediatR(cfg =>
 builder.Services.AddControllers();
 var app = builder.Build();
 
+
+
+//app.MapDefaultEndpoints();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -107,6 +178,10 @@ if (app.Environment.IsDevelopment())
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Order Service API v1");
         c.RoutePrefix = string.Empty; // serves Swagger UI at root
+        c.OAuthClientId(swaggerClientId);
+        c.OAuthUsePkce();
+        c.OAuthScopeSeparator(" ");
+        c.OAuthScopes(entraScopes);
     });
 }
 app.MapControllers();
@@ -116,7 +191,8 @@ await using (var scope = app.Services.CreateAsyncScope())
     var db = scope.ServiceProvider.GetRequiredService<OrderDbContext>();
     await db.Database.MigrateAsync();
 }
-
+app.UseAuthentication();
+app.UseAuthorization();
 //app.MapPost("/api/orders", async (CreateOrderRequest request, CreateOrderHandler handler, CancellationToken ct) =>
 //{
 //    try

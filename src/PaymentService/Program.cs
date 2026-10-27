@@ -4,8 +4,11 @@ using PaymentService.Domain;
 using PaymentService.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddDbContext<PaymentDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("PaymentDb")));
+builder.Services.AddHostedService<PaymentSagaConsumer>();
+builder.Services.AddHostedService<PaymentOutboxDispatcher>();
 
 //enable swagger for API documentation
 builder.Services.AddEndpointsApiExplorer();
@@ -34,6 +37,34 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PaymentDbContext>();
     await db.Database.EnsureCreatedAsync();
+    await db.Database.ExecuteSqlRawAsync(
+        """
+        IF OBJECT_ID(N'dbo.PaymentEventReceipts', N'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.PaymentEventReceipts
+            (
+                MessageId nvarchar(128) NOT NULL CONSTRAINT PK_PaymentEventReceipts PRIMARY KEY,
+                ProcessedAtUtc datetime2 NOT NULL
+            );
+        END;
+        IF OBJECT_ID(N'dbo.PaymentOutboxMessages', N'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.PaymentOutboxMessages
+            (
+                Id uniqueidentifier NOT NULL CONSTRAINT PK_PaymentOutboxMessages PRIMARY KEY,
+                DestinationName nvarchar(256) NOT NULL,
+                Subject nvarchar(256) NOT NULL,
+                Payload nvarchar(max) NOT NULL,
+                CreatedAtUtc datetime2 NOT NULL,
+                ProcessedAtUtc datetime2 NULL,
+                NextAttemptAtUtc datetime2 NOT NULL,
+                Attempts int NOT NULL,
+                LastError nvarchar(4000) NULL
+            );
+            CREATE INDEX IX_PaymentOutboxMessages_ProcessedAtUtc_NextAttemptAtUtc
+                ON dbo.PaymentOutboxMessages(ProcessedAtUtc, NextAttemptAtUtc);
+        END;
+        """);
 }
 
 app.MapPost("/api/payments/process", async (ProcessPaymentRequest request, PaymentDbContext db, CancellationToken ct) =>

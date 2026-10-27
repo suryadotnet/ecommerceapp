@@ -1,43 +1,34 @@
-# Testing the Outbox and Dead-Letter Queues
+# Testing the Choreography Saga, Outbox, and Dead-Letter Queues
 
-This guide exercises the current OrderService outbox and InventoryService Azure Service Bus consumers. The consumer records events in InventoryDb; it does not reserve inventory from the `OrderCreated` event. Checkout continues to reserve inventory synchronously over HTTP.
+The end-to-end saga uses the `ordersvctopic` topic:
+
+```text
+OrderCreated -> InventoryReserved -> PaymentSucceeded -> Order Confirmed
+                            \-> PaymentFailed
+                                 |-> InventoryReleased
+                                 \-> Order Failed
+```
+
+Each service persists business changes and outgoing events in one local database transaction. Its outbox dispatcher sends messages to Service Bus; consumers use inbox receipts and idempotent state transitions to tolerate redelivery.
 
 ## Prerequisites
 
-- SQL Server is running, and the OrderDb, InventoryDb, and PaymentDb connection strings work.
-- The Azure Service Bus namespace contains:
-  - Queue: `ordersvcqueue`
-  - Topic: `ordersvctopic`
-  - Subscription: `ordersvctopicsubscription`
-- The OrderService identity or shared access policy can **Send** messages.
-- The InventoryService identity or shared access policy can **Listen** to the queue and topic subscription.
-- Both OrderService and InventoryService have Service Bus configuration.
+- SQL Server and the OrderDb, InventoryDb, and PaymentDb connection strings are available.
+- The Azure Service Bus namespace contains topic `ordersvctopic` and these subscriptions:
+  - `inventorysvcsubscription`: `EventType = 'OrderCreated' OR EventType = 'PaymentFailed'`
+  - `paymentsvcsubscription`: `EventType = 'InventoryReserved'`
+  - `ordersvctopicsubscription`: `EventType = 'PaymentSucceeded' OR EventType = 'PaymentFailed' OR EventType = 'InventoryReleased'`
+- Remove each subscription's default match-all rule.
+- Each message must set the `EventType` application property. The application also sets the Service Bus subject to the event name.
+- OrderService, InventoryService, and PaymentService have appropriate Service Bus send/receive permissions and configuration.
 
-For local development, set the connection string separately in each service's terminal before starting it. Use a policy with the appropriate permissions and keep the key out of source control:
+In Azure, prefer Managed Identity with least-privilege Azure Service Bus Data Sender and Data Receiver roles. For local development, use a Service Bus connection string from user secrets or an environment variable; do not commit credentials. Configure `ConnectionStrings__ServiceBus` or `ServiceBus__Namespace` for each service. When using namespace-based authentication locally, sign in with an Azure identity that has the required data-plane roles.
 
-```bash
-export ConnectionStrings__ServiceBus='Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<policy>;SharedAccessKey=<key>'
-dotnet run --project src/OrderService
-```
+Start OrderService, InventoryService, and PaymentService. Confirm each logs that its consumer started and its outbox dispatcher has Service Bus settings. If a service reports an authorization or connection error, resolve it before testing.
 
-In another terminal, set the listener connection string and start InventoryService:
+## Test successful payment
 
-```bash
-export ConnectionStrings__ServiceBus='Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<listen-policy>;SharedAccessKey=<key>'
-dotnet run --project src/InventoryService
-```
-
-Start PaymentService in a third terminal:
-
-```bash
-dotnet run --project src/PaymentService
-```
-
-Wait for InventoryService to log that it is consuming from `ordersvcqueue` and `ordersvctopic/ordersvctopicsubscription`. If it logs credential or authorization errors, fix the credentials and permissions before proceeding.
-
-## Test successful outbox delivery
-
-Create an order:
+Create an order whose total is below `99999`:
 
 ```bash
 curl -i -X POST http://localhost:5001/api/orders \
@@ -52,86 +43,71 @@ curl -i -X POST http://localhost:5001/api/orders \
   }'
 ```
 
-Copy the `orderId` from the response. OrderService stores an `OrderCreated` event in OrderDb's `OutboxMessages` table in the same save as the order. The dispatcher sends it to `ordersvcqueue`; InventoryService persists its receipt before completing the Service Bus message.
-
-Check OrderDb:
-
-```sql
-SELECT Id, Subject, DestinationName, Attempts, ProcessedAtUtc, LastError
-FROM dbo.OutboxMessages
-ORDER BY CreatedAtUtc DESC;
-```
-
-The `OrderCreated` row should have `ProcessedAtUtc` set after a successful send. Check InventoryDb:
-
-```sql
-SELECT MessageId, OrderId, CustomerId, TotalAmount, ReceivedAtUtc
-FROM dbo.OrderCreatedReceipts
-ORDER BY ReceivedAtUtc DESC;
-```
-
-Now run checkout, replacing `<ORDER_ID>` with the response's order ID:
+The order is created as `Pending`. Save its `orderId`, then poll its state:
 
 ```bash
-curl -i -X POST http://localhost:5001/api/orders/<ORDER_ID>/checkout
+curl http://localhost:5001/api/orders/<ORDER_ID>
 ```
 
-After checkout, OrderService writes a `PaymentInfo` event to the outbox and dispatches it to the topic. Check for the topic event in OrderDb and the received event in InventoryDb:
+After messages are processed, the expected order status is `Confirmed`. Inventory's available quantity decreases and reserved quantity increases; PaymentDb records a processed payment.
+
+Check the outbox rows:
 
 ```sql
 SELECT Id, Subject, DestinationName, Attempts, ProcessedAtUtc, LastError
 FROM dbo.OutboxMessages
-WHERE Subject = 'PaymentInfo'
+ORDER BY CreatedAtUtc DESC;
+
+SELECT Id, Subject, DestinationName, Attempts, ProcessedAtUtc, LastError
+FROM dbo.InventoryOutboxMessages
+ORDER BY CreatedAtUtc DESC;
+
+SELECT Id, Subject, DestinationName, Attempts, ProcessedAtUtc, LastError
+FROM dbo.PaymentOutboxMessages
 ORDER BY CreatedAtUtc DESC;
 ```
 
-```sql
-SELECT MessageId, OrderId, Amount, Status, ReceivedAtUtc
-FROM dbo.PaymentInfoReceipts
-ORDER BY ReceivedAtUtc DESC;
+The respective rows should include `OrderCreated`, `InventoryReserved`, and `PaymentSucceeded`, with `ProcessedAtUtc` set after dispatch.
+
+## Test payment failure and compensation
+
+Create an order with a total of `99999` or greater. PaymentService intentionally declines this amount in the demo:
+
+```bash
+curl -i -X POST http://localhost:5001/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "customerId": "11111111-1111-1111-1111-111111111111",
+    "items": [{
+      "productId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "quantity": 1,
+      "unitPrice": 100000
+    }]
+  }'
 ```
 
-PaymentInfo is only generated by checkout. The topic message is delivered to the subscription, so verify subscription activity rather than relying only on the topic's message count. With the current consumer, `MessageId` is the receipt primary key; a redelivery of the same message is recorded once.
+The expected final order status is `Failed`; inventory is released and its available quantity is restored. Check that the Payment outbox contains `PaymentFailed`, and the Inventory outbox contains `InventoryReleased`. InventoryDb's `InventoryReservations` row for the order should have `IsReleased = 1`.
 
-## Test `UnexpectedSubject` in the DLQ
+## Test duplicate handling
 
-In Azure Portal, open the namespace's `ordersvcqueue`, then **Service Bus Explorer** and send a message with:
+Redeliver an event or publish a duplicate `OrderCreated` for the same order with a different Service Bus message ID and `EventType = OrderCreated`. Inventory should not reserve the stock a second time. Replaying a `PaymentFailed` after compensation should not release stock twice.
 
-- Message ID: `dlq-wrong-subject-test-001`
-- Subject: `WrongSubject`
-- Body: `{}`
+## Test dead-letter handling
 
-The consumer compares the subject with `OrderCreated`. It should dead-letter this message with reason `UnexpectedSubject`. Open the queue's dead-letter view to inspect it.
+Send test events to topic `ordersvctopic` through Service Bus Explorer. Set `EventType` to a value accepted by the target subscription filter so the message is delivered to the consumer.
 
-## Test `InvalidPayload` in the DLQ
+- For the Inventory subscription, set `EventType = OrderCreated`, subject `WrongSubject`, and body `{}`. It should be dead-lettered with reason `InvalidEventType`.
+- For the Payment subscription, set `EventType = InventoryReserved`, subject `InventoryReserved`, and body `not-json`. It should be dead-lettered with reason `InvalidPayload`.
+- For the Order subscription, set `EventType = PaymentFailed`, subject `PaymentFailed`, and body `not-json`. It should be dead-lettered with reason `InvalidPayload`.
 
-Send another message to `ordersvcqueue` with:
-
-- Message ID: `dlq-invalid-payload-test-001`
-- Subject: `OrderCreated`
-- Content type: `application/json`
-- Body: `not-json`
-
-The consumer should dead-letter it with reason `InvalidPayload`. A valid JSON body with an empty order ID is another invalid-payload test:
-
-```json
-{
-  "orderId": "00000000-0000-0000-0000-000000000000",
-  "customerId": "11111111-1111-1111-1111-111111111111",
-  "totalAmount": 200,
-  "createdAtUtc": "2026-10-13T00:00:00Z"
-}
-```
-
-For the topic consumer, send `not-json` to topic `ordersvctopic` with subject `PaymentInfo`, a unique message ID, and `application/json` content type. Inspect the dead-letter messages for the `ordersvctopicsubscription` subscription. If that subscription uses a subject filter, ensure the test message matches the filter; otherwise it will never reach the consumer.
-
-The current code also abandons messages when persistence fails. Service Bus will dead-letter a message after its configured maximum delivery count. This test is optional: deliberately break InventoryDb connectivity, send a valid test message, and restore connectivity after the message reaches the DLQ.
+Transient database or processing errors are abandoned for retry. Service Bus moves messages to the subscription's dead-letter queue after its configured maximum delivery count. Inspect active and dead-letter counts in the matching subscription.
 
 ## Troubleshooting
 
-- **Messages remain active in the queue:** Check InventoryService's startup log and Service Bus processor errors. Verify listener credentials, Listen permission, entity names, and network connectivity.
-- **Outbox row is pending:** Check OrderService logs, sender credentials, and Send permission. The dispatcher retries failed sends and stores the latest error in `LastError`.
-- **No payment receipt:** Confirm checkout ran and the PaymentInfo outbox row was dispatched. Then check the subscription's active/dead-letter counts and any subscription filters.
-- **No receipt row, message disappeared:** Check the matching DLQ. Malformed payloads and unexpected subjects are dead-lettered by this consumer.
+- **Outbox row remains pending:** Check that the service has database connectivity, Service Bus sender permissions, the correct topic name, and no persistent failure shown in `LastError`.
+- **Subscription backlog grows:** Check its receiver identity, subscription name, SQL filter, and Service Bus network access.
+- **Order stays Pending:** Follow the `OrderCreated`, `InventoryReserved`, and payment outcome outbox rows in order; inspect each subscription's active and dead-letter messages.
+- **Order is Failed but stock remains reserved:** Check `PaymentFailed` delivery and InventoryService logs, then inspect the Inventory subscription DLQ and `InventoryReservations`.
+- **InventoryReleased is not seen by OrderService:** Check the Order subscription's filter includes `EventType = 'InventoryReleased'` and the Inventory outbox row was dispatched.
 
-Use unique message IDs for each manual test. These tests add messages to the real queue/topic and can affect other consumers sharing those entities.
+Use unique message IDs for manual tests. Tests publish to the real topic and can affect consumers sharing these subscriptions.

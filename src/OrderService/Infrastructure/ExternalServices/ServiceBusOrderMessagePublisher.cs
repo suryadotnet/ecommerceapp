@@ -9,4 +9,10 @@ public sealed record OrderCreatedMessage(
     Guid OrderId,
     Guid CustomerId,
     decimal TotalAmount,
-    DateTime CreatedAtUtc);
+    DateTime CreatedAtUtc,
+    IReadOnlyList<OrderCreatedItemMessage> Items);
+
+public sealed record OrderCreatedItemMessage(
+    Guid ProductId,
+    int Quantity,
+    decimal UnitPrice);

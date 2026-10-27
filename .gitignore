@@ -2,3 +2,12 @@ bin/
 obj/
 .vs/
 *.user
+.env
+.env.*
+!.env.example
+**/appsettings.Development.json
+**/local.settings.json
+**/secrets*.json
+./localsettings.json
+./development.localsettings.json
+./appsettings.development.json

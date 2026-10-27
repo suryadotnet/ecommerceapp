@@ -78,6 +78,7 @@ public sealed class OutboxDispatcher : BackgroundService
                     Subject = outboxMessage.Subject,
                     ContentType = "application/json"
                 };
+                message.ApplicationProperties["EventType"] = outboxMessage.Subject;
 
                 await sender.SendMessageAsync(message, cancellationToken);
                 outboxMessage.MarkProcessed(DateTime.UtcNow);
