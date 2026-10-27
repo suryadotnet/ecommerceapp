@@ -5,3 +5,6 @@ obj/
 .env
 .env.*
 !.env.example
+.localsettings.json
+.development.localsettings.json
+.appsettings.development.json
